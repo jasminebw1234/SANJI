@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF Voice Reader — Phase 1 Test</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; color: #222; }
+    h1 { font-size: 1.3rem; }
+    #dropzone { border: 2px dashed #999; border-radius: 12px; padding: 32px 16px; text-align: center; cursor: pointer; }
+    #dropzone.dragover { border-color: #333; background: #f5f5f5; }
+    #status { margin-top: 20px; font-size: 0.95rem; }
+    #result { margin-top: 20px; white-space: pre-wrap; font-size: 0.85rem; background: #f5f5f5; padding: 12px; border-radius: 8px; }
+    .flag { color: #b45309; }
+    .error { color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <h1>PDF Voice Reader — Phase 1 Test</h1>
+  <p>Upload a PDF to test: text-layer detection → OCR fallback → section extraction.</p>
+
+  <div id="dropzone">
+    <p>Tap to choose a PDF, or drag one here</p>
+    <input type="file" id="fileInput" accept="application/pdf" style="display:none" />
+  </div>
+
+  <div id="status"></div>
+  <div id="result"></div>
+
+  <script>
+    const API_BASE = 'http://localhost:3001/api/documents';
+
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+    const statusEl = document.getElementById('status');
+    const resultEl = document.getElementById('result');
+
+    dropzone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files[0]) uploadFile(e.target.files[0]);
+    });
+
+    ['dragover', 'dragleave', 'drop'].forEach((evt) => {
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropzone.classList.toggle('dragover', evt === 'dragover');
+      });
+    });
+    dropzone.addEventListener('drop', (e) => {
+      if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
+    });
+
+    async function uploadFile(file) {
+      statusEl.textContent = 'Uploading and processing... (OCR can take a while for scanned pages)';
+      resultEl.textContent = '';
+
+      const formData = new FormData();
+      formData.append('pdf', file);
+
+      try {
+        const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
+        const data = await res.json();
+
+        if (!res.ok) {
+          statusEl.innerHTML = `<span class="error">${data.message || 'Something went wrong.'}</span>`;
+          return;
+        }
+
+        statusEl.textContent = `Done — ${data.sectionCount} sections extracted.` +
+          (data.hasTextLayer ? ' (had a text layer, no OCR needed)' : ' (used OCR)');
+
+        let output = `Document ID: ${data.documentId}\n`;
+        if (data.needsReview) {
+          output += `\n⚠ Some pages had low OCR confidence and may need review:\n`;
+          output += JSON.stringify(data.ocrConfidenceFlags, null, 2);
+        }
+        resultEl.textContent = output;
+      } catch (err) {
+        statusEl.innerHTML = `<span class="error">Couldn't reach the backend. Is it running on port 3001?</span>`;
+      }
+    }
+  </script>
+</body>
+</html>
