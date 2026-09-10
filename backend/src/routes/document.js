@@ -10,6 +10,7 @@ import { saveFile } from '../services/storageAdapter.js';
 import { checkTextLayer } from '../services/textLayerCheck.js';
 import { runOcr } from '../services/ocr.js';
 import { splitIntoSections } from '../services/sectionSplitter.js';
+import { tagSectionMoods } from '../services/moodTagger.js';
 
 const router = express.Router();
 
@@ -130,11 +131,36 @@ router.post('/upload', (req, res) => {
 
       // --- Split into sections and store ---
       const sections = splitIntoSections(extractedText);
+      const insertedSections = [];
       for (const section of sections) {
-        await query(
-          `INSERT INTO sections (document_id, order_index, text) VALUES ($1, $2, $3)`,
+        const result = await query(
+          `INSERT INTO sections (document_id, order_index, text) VALUES ($1, $2, $3) RETURNING id, order_index, text`,
           [documentId, section.order_index, section.text]
         );
+        insertedSections.push(result.rows[0]);
+      }
+
+      // --- Stage 4: mood/tone tagging ---
+      // Runs synchronously as part of upload for MVP simplicity. A failure
+      // here (missing API key, network issue, malformed model output)
+      // should never take down the whole upload — the document is still
+      // fully usable for reading, just without mood tags, and can be
+      // re-tagged later via POST /:id/mood-tags.
+      let moodTaggingStatus = 'skipped';
+      if (process.env.ANTHROPIC_API_KEY) {
+        try {
+          const tags = await tagSectionMoods(insertedSections);
+          for (const tag of tags) {
+            await query(
+              `UPDATE sections SET mood_tag = $2, mood_tag_confidence = $3 WHERE id = $1`,
+              [tag.id, tag.mood_tag, tag.mood_tag_confidence]
+            );
+          }
+          moodTaggingStatus = 'tagged';
+        } catch (err) {
+          console.error('Mood tagging failed:', err);
+          moodTaggingStatus = 'failed';
+        }
       }
 
       await query(`UPDATE documents SET status = 'ready' WHERE id = $1`, [documentId]);
@@ -147,7 +173,9 @@ router.post('/upload', (req, res) => {
         ocrConfidenceFlags: ocrFlags, // null if no OCR was needed
         // Flag pages needing review — this is what stage 3a's frontend
         // checkpoint will read from.
-        needsReview: Boolean(ocrFlags && ocrFlags.length > 0)
+        needsReview: Boolean(ocrFlags && ocrFlags.length > 0),
+        // 'tagged' | 'failed' | 'skipped' (no ANTHROPIC_API_KEY configured)
+        moodTaggingStatus
       });
     } catch (error) {
       console.error('Upload pipeline error:', error);
@@ -177,11 +205,62 @@ router.get('/:id', async (req, res) => {
   }
 
   const sectionsResult = await query(
-    `SELECT id, order_index, text, mood_tag FROM sections WHERE document_id = $1 ORDER BY order_index`,
+    `SELECT id, order_index, text, mood_tag, mood_tag_confidence, user_mood_override FROM sections WHERE document_id = $1 ORDER BY order_index`,
     [id]
   );
 
   res.json({ document: docResult.rows[0], sections: sectionsResult.rows });
+});
+
+// Re-run mood tagging for a document's sections. Useful when the initial
+// upload's tagging pass was skipped (no API key configured yet) or failed
+// (transient API/network issue) — lets a document be re-tagged without
+// re-uploading and re-running OCR.
+router.post('/:id/mood-tags', async (req, res) => {
+  const { id } = req.params;
+
+  const docResult = await query(`SELECT id FROM documents WHERE id = $1`, [id]);
+  if (docResult.rows.length === 0) {
+    return res.status(404).json({
+      error: 'NOT_FOUND',
+      message: 'This document is no longer available. Please upload it again.'
+    });
+  }
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(503).json({
+      error: 'MOOD_TAGGING_UNAVAILABLE',
+      message: 'Mood tagging is not configured — set ANTHROPIC_API_KEY in the backend .env file.'
+    });
+  }
+
+  const sectionsResult = await query(
+    `SELECT id, order_index, text FROM sections WHERE document_id = $1 ORDER BY order_index`,
+    [id]
+  );
+
+  try {
+    const tags = await tagSectionMoods(sectionsResult.rows);
+    for (const tag of tags) {
+      await query(
+        `UPDATE sections SET mood_tag = $2, mood_tag_confidence = $3 WHERE id = $1`,
+        [tag.id, tag.mood_tag, tag.mood_tag_confidence]
+      );
+    }
+
+    const updated = await query(
+      `SELECT id, order_index, text, mood_tag, mood_tag_confidence FROM sections WHERE document_id = $1 ORDER BY order_index`,
+      [id]
+    );
+
+    res.json({ documentId: id, moodTaggingStatus: 'tagged', sections: updated.rows });
+  } catch (error) {
+    console.error('Mood re-tagging failed:', error);
+    res.status(502).json({
+      error: 'MOOD_TAGGING_FAILED',
+      message: 'Mood tagging failed — please try again in a moment.'
+    });
+  }
 });
 
 export default router;

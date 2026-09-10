@@ -1,13 +1,39 @@
-# PDF Voice Reader — Phase 1
+# PDF Voice Reader — Phase 1 + Mood Tagging
 
 This is the first working slice from the MVP build plan: **upload → text-layer
-detection → OCR fallback → section extraction**, stored in Postgres (Neon)
-with files in local storage (swappable to Cloudflare R2/Vercel Blob later).
+detection → OCR fallback → section extraction → mood/tone tagging**, stored in
+Postgres (Neon) with files in local storage (swappable to Cloudflare R2/Vercel
+Blob later).
+
+> **Note on phase numbering:** the MVP plan's own "Suggested Build Phases"
+> list this as **Phase 3** (Phase 2 is the voice-selection UI, not yet
+> built). Building it now, ahead of voice selection, was a deliberate call —
+> mood tagging doesn't depend on a voice being chosen — but worth knowing the
+> numbering here doesn't match the plan doc's order.
 
 ## What's included
-- `backend/` — Node.js/Express API implementing pipeline stages 1–3a
+- `backend/` — Node.js/Express API implementing pipeline stages 1–4 (upload
+  through mood tagging)
 - `frontend/index.html` — a bare-bones upload page to test the pipeline (not the real app UI — that comes in Phase 4/5 with playback and sync)
 - `backend/src/db/schema.sql` — full Postgres schema matching every table from the architecture doc, so later phases don't need a schema migration scramble
+
+## Mood tagging
+Each section (paragraph) gets tagged with one of five moods — `neutral`,
+`cautionary`, `exciting`, `serious`, `technical` — per the MVP plan's own
+example categories, using the Claude API (`claude-haiku-4-5-20251001` by
+default; cheap enough that this stays a few cents per document, per the
+plan's cost estimate). This runs automatically at the end of upload if
+`ANTHROPIC_API_KEY` is set; if it's not set, or the call fails, the upload
+still succeeds — sections just come back untagged, and can be tagged later
+via `POST /api/documents/:id/mood-tags`.
+
+Verified end-to-end against the real Anthropic API (confirmed reachable,
+got a real structured response back) using a deliberately invalid key: the
+call correctly fails, the document still uploads successfully with
+`moodTaggingStatus: "failed"`, and the server stays up. I don't have a real
+API key to test in this sandbox, so the actual tagging *quality* — whether
+the mood labels it picks are good — hasn't been verified against real
+output. Worth spot-checking on a few real documents once you add your key.
 
 ## Prerequisites
 1. **Node.js** (v18+) installed on your machine
@@ -84,10 +110,10 @@ and section-split correctly, corrupted/wrong-type/oversized uploads return
 the right error codes, and the server now survives OCR and DB failures that
 previously killed it outright.
 
-## What this Phase 1 slice does NOT include yet
+## What this slice does NOT include yet
 Per the build plan, these come in later phases:
-- Mood tagging (Phase 3)
-- Voice generation / TTS (Phase 3)
+- Voice selection UI (Phase 2)
+- Voice generation / TTS (Phase 4)
 - Playback UI + synced highlighting (Phase 5)
 - On-the-fly voice switching + caching (Phase 6)
 - Voice history, download, feedback (added to the plan after Phase 1)
