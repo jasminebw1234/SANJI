@@ -1,4 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
+import { z } from 'zod';
 
 // Pipeline stage 4: mood/tone tagging.
 //
@@ -11,14 +13,33 @@ import Anthropic from '@anthropic-ai/sdk';
 // meaningful to later phases (delivery-shifting narration in Phase 4/5):
 export const ALLOWED_MOODS = ['neutral', 'cautionary', 'exciting', 'serious', 'technical'];
 
-const DEFAULT_MODEL = process.env.MOOD_TAGGING_MODEL || 'claude-haiku-4-5-20251001';
+// Defaults to Claude Opus 5. This is a simple classification task, so
+// `effort: low` keeps the spend down without changing models — but if you
+// want it cheaper still, set MOOD_TAGGING_MODEL=claude-haiku-4-5, which is
+// roughly 5x cheaper per token and closer to the MVP plan's "a few cents
+// per document" estimate. Spot-check both on a real document before
+// deciding: `npm run check-moods -- <file.pdf|file.txt>`.
+const DEFAULT_MODEL = process.env.MOOD_TAGGING_MODEL || 'claude-opus-5';
 
-// Batching sections into one request per chunk keeps this "a few cents per
-// document" as the plan estimates, instead of one API call per paragraph.
-// A ~50-page document can still have 100+ paragraphs, so a single request
-// covering all of them risks a huge prompt and an easy-to-truncate response;
-// this caps how many sections go in one call.
+// Batching sections into one request per chunk keeps this cheap, instead of
+// one API call per paragraph. A ~50-page document can still have 100+
+// paragraphs, so a single request covering all of them risks a huge prompt
+// and an easy-to-truncate response; this caps how many go in one call.
 const MAX_SECTIONS_PER_BATCH = 25;
+
+// Structured outputs: the API validates the response against this schema
+// server-side, so we never have to parse loose text, strip code fences, or
+// handle "the model wrapped it in prose" — a whole class of failure that
+// the previous hand-rolled JSON parsing had to defend against.
+const MoodTagsSchema = z.object({
+  tags: z.array(
+    z.object({
+      index: z.number().int(),
+      mood: z.enum(ALLOWED_MOODS),
+      confidence: z.number().min(0).max(1)
+    })
+  )
+});
 
 let client = null;
 function getClient() {
@@ -46,47 +67,30 @@ export function buildPrompt(sections) {
 
   return `You are tagging the tone/mood of paragraphs from a non-fiction document (a paper, article, or informational book) so a text-to-speech narrator can adjust its delivery per section. This is NOT dialogue or character speech — there is a single continuous narrator throughout, so do not attribute tone to any speaker.
 
-Allowed moods (use exactly one of these per paragraph, lowercase): ${ALLOWED_MOODS.join(', ')}
+Allowed moods: ${ALLOWED_MOODS.join(', ')}
 
-For each paragraph below (numbered by its section index), pick the mood that best fits its content and delivery, and a confidence from 0 to 1.
-
-Respond with ONLY a JSON array, no other text, in this exact shape:
-[{"index": 0, "mood": "neutral", "confidence": 0.9}, ...]
-
-Include exactly one entry per paragraph index given below, in any order.
+For each paragraph below, pick the mood that best fits how a narrator should deliver it, and a confidence from 0 to 1. Return exactly one entry per paragraph, using the paragraph's bracketed index.
 
 Paragraphs:
 ${list}`;
 }
 
-export function parseResponse(responseText, expectedIndices) {
-  let parsed;
-  try {
-    // Models occasionally wrap JSON in a code fence despite instructions —
-    // strip that defensively rather than fail the whole batch over it.
-    const cleaned = responseText.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-    parsed = JSON.parse(cleaned);
-  } catch (err) {
-    throw new Error(`Mood tagging response was not valid JSON: ${err.message}`);
-  }
-
-  if (!Array.isArray(parsed)) {
-    throw new Error('Mood tagging response was not a JSON array');
-  }
-
+/**
+ * Fills in any index the model dropped, so a section never silently ends up
+ * with a null mood_tag that a later phase then has to special-case.
+ */
+export function normalizeTags(entries, expectedIndices) {
   const byIndex = new Map();
-  for (const entry of parsed) {
-    if (typeof entry.index !== 'number') continue;
-    const mood = ALLOWED_MOODS.includes(entry.mood) ? entry.mood : 'neutral';
-    const confidence = typeof entry.confidence === 'number'
-      ? Math.max(0, Math.min(1, entry.confidence))
-      : 0;
-    byIndex.set(entry.index, { mood, confidence });
+  for (const entry of entries || []) {
+    if (typeof entry?.index !== 'number') continue;
+    byIndex.set(entry.index, {
+      mood: ALLOWED_MOODS.includes(entry.mood) ? entry.mood : 'neutral',
+      confidence: typeof entry.confidence === 'number'
+        ? Math.max(0, Math.min(1, entry.confidence))
+        : 0
+    });
   }
 
-  // Any index the model dropped or mis-tagged falls back to a safe default
-  // rather than leaving that section's mood_tag null and silently breaking
-  // whatever later phase reads it.
   return expectedIndices.map((index) => ({
     index,
     ...(byIndex.get(index) || { mood: 'neutral', confidence: 0 })
@@ -107,18 +111,21 @@ export async function tagSectionMoods(sections) {
 
   for (const batch of batches) {
     const expectedIndices = batch.map((s) => s.order_index);
-    const message = await anthropic.messages.create({
+
+    const response = await anthropic.messages.parse({
       model: DEFAULT_MODEL,
-      max_tokens: 4096,
+      max_tokens: 8192,
+      // Tone classification is a simple judgement call, not a reasoning
+      // problem — low effort keeps thinking tokens (and cost) down.
+      output_config: {
+        effort: 'low',
+        format: zodOutputFormat(MoodTagsSchema)
+      },
       messages: [{ role: 'user', content: buildPrompt(batch) }]
     });
 
-    const responseText = message.content
-      .filter((block) => block.type === 'text')
-      .map((block) => block.text)
-      .join('');
-
-    const tagged = parseResponse(responseText, expectedIndices);
+    // parsed_output is null if the model's output failed schema validation.
+    const tagged = normalizeTags(response.parsed_output?.tags, expectedIndices);
     const byOrderIndex = new Map(batch.map((s) => [s.order_index, s]));
 
     for (const { index, mood, confidence } of tagged) {

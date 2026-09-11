@@ -1,20 +1,21 @@
-# PDF Voice Reader — Phase 1 + Mood Tagging
+# PDF Voice Reader — Phases 1–3
 
-This is the first working slice from the MVP build plan: **upload → text-layer
-detection → OCR fallback → section extraction → mood/tone tagging**, stored in
-Postgres (Neon) with files in local storage (swappable to Cloudflare R2/Vercel
-Blob later).
+Working slices from the MVP build plan: **upload → text-layer detection →
+OCR fallback → section extraction → mood/tone tagging**, plus **narrator
+voice selection**. Stored in Postgres (Neon) with files in local storage
+(swappable to Cloudflare R2/Vercel Blob later).
 
-> **Note on phase numbering:** the MVP plan's own "Suggested Build Phases"
-> list this as **Phase 3** (Phase 2 is the voice-selection UI, not yet
-> built). Building it now, ahead of voice selection, was a deliberate call —
-> mood tagging doesn't depend on a voice being chosen — but worth knowing the
-> numbering here doesn't match the plan doc's order.
+Mood tagging (the plan's Phase 3) was built before voice selection (Phase 2).
+That ordering is safe because the two are **independent**: mood tagging reads
+only the document's text, and voice selection reads only the provider's voice
+library. Neither is an input to the other — they first meet downstream in
+Phase 4, where narration generation combines `(voice + mood)` into the TTS
+call, and in the `audio_cache` key `(section + voice + tone)`.
 
 ## What's included
 - `backend/` — Node.js/Express API implementing pipeline stages 1–4 (upload
-  through mood tagging)
-- `frontend/index.html` — a bare-bones upload page to test the pipeline (not the real app UI — that comes in Phase 4/5 with playback and sync)
+  through mood tagging) plus the voice-selection catalog
+- `frontend/index.html` — a bare-bones upload page + voice picker to test the pipeline (not the real app UI — that comes in Phase 5 with playback and sync)
 - `backend/src/db/schema.sql` — full Postgres schema matching every table from the architecture doc, so later phases don't need a schema migration scramble
 
 ## Mood tagging
@@ -27,13 +28,61 @@ plan's cost estimate). This runs automatically at the end of upload if
 still succeeds — sections just come back untagged, and can be tagged later
 via `POST /api/documents/:id/mood-tags`.
 
-Verified end-to-end against the real Anthropic API (confirmed reachable,
-got a real structured response back) using a deliberately invalid key: the
-call correctly fails, the document still uploads successfully with
-`moodTaggingStatus: "failed"`, and the server stays up. I don't have a real
-API key to test in this sandbox, so the actual tagging *quality* — whether
-the mood labels it picks are good — hasn't been verified against real
-output. Worth spot-checking on a few real documents once you add your key.
+### Spot-checking the tagging quality yourself
+The wiring is verified, but whether the *labels are any good* needs a human
+eye on real documents. There's a script for exactly that — it skips the
+database, the upload flow and the frontend, and just prints every paragraph
+next to the mood it got:
+
+```bash
+cd backend
+# 1. Get a key at https://console.anthropic.com/settings/keys
+# 2. Put it in backend/.env:  ANTHROPIC_API_KEY=sk-ant-...
+npm run check-moods -- ../path/to/some-paper.pdf
+```
+
+It prints each paragraph with its mood and confidence, a distribution
+summary, and flags anything tagged below 0.6 confidence — those are the ones
+worth reading closely. It also warns if *everything* came back `neutral`,
+which usually means the prompt isn't discriminating rather than that the
+document is genuinely monotone.
+
+The plan suggests testing on three document types — a paper, a scanned
+article, and a chapter of a non-fiction book. For the scanned one, upload it
+through the running backend instead (the script skips OCR to stay fast).
+
+To compare models on the same file:
+```bash
+MOOD_TAGGING_MODEL=claude-haiku-4-5 npm run check-moods -- ../some-paper.pdf
+```
+
+## Voice selection (Phase 2)
+`GET /api/voices` returns ElevenLabs' voice library normalized to a stable
+internal shape, filterable by gender, age, accent and style;
+`GET /api/voices/filters` returns the filter values actually present in the
+catalog, so the picker can't offer a filter that matches nothing.
+`POST /api/documents/:id/voice` records the chosen narrator (validated
+against the live catalog first, so an unusable voice ID never reaches
+narration generation), and `GET /api/documents/:id/voice` returns the current
+choice plus the full history — which is what Phase 6's mid-playback switching
+and cache reuse will read.
+
+The provider is isolated in `src/services/voiceCatalog.js`, the same way
+`storageAdapter.js` isolates file storage: the plan names Google Cloud TTS
+and Amazon Polly as fallbacks if ElevenLabs gets too expensive, and swapping
+means rewriting that one file.
+
+**Verification status — read this before trusting it.** `api.elevenlabs.io`
+was blocked by network egress policy in the environment this was built in, so
+unlike the mood tagging (where the request provably reached Anthropic and came
+back with a real structured error), **the live ElevenLabs call has never been
+executed**. What *is* tested: normalization, filtering, filter derivation,
+defensive handling of voices with missing labels, and every route's error
+path — all against `backend/scripts/fixtures/elevenlabs-voices.json`, a
+fixture built from ElevenLabs' *documented* response shape, not a real
+capture. If the picker misbehaves against the real API, diff a real
+`/v1/voices` response against that fixture first; a shape change there is by
+far the most likely cause.
 
 ## Prerequisites
 1. **Node.js** (v18+) installed on your machine
@@ -58,8 +107,15 @@ output. Worth spot-checking on a few real documents once you add your key.
 cd backend
 npm install
 cp .env.example .env
-# edit .env and paste your Neon (or local Postgres) connection string into DATABASE_URL
+# edit .env:
+#   DATABASE_URL        — your Neon (or local Postgres) connection string
+#   ANTHROPIC_API_KEY   — optional, enables mood tagging (console.anthropic.com)
+#   ELEVENLABS_API_KEY  — optional, enables the voice picker (elevenlabs.io)
 ```
+
+Both API keys are optional: without them the pipeline still runs end to end,
+mood tagging reports `skipped`, and the voice picker returns a 503 explaining
+what to configure.
 
 Run the schema against your database (via Neon's SQL editor in their dashboard, or `psql`):
 ```bash
@@ -104,19 +160,29 @@ environment setup issues — fixed as part of getting the backend running:
   connection, reset socket) crashes the whole process if unhandled.
   Confirmed against a real connection reset during testing, not a
   hypothetical. Added the listener in `db/index.js`.
+- **Async route handlers had no error handling, so any database error on a
+  read endpoint crashed the process.** Express 4 does not catch rejections
+  from `async` handlers — an `await query(...)` that throws becomes an
+  unhandled rejection, which Node turns into an uncaught exception. Caught
+  this the hard way: the database went down mid-test and `GET /:id` killed
+  the whole server. (Note this is a *different* bug from the pool listener
+  above — that one covers errors on **idle** clients, this one covers errors
+  on **in-flight queries**.) Added `middleware/asyncHandler.js` plus terminal
+  error middleware, and verified by stopping Postgres mid-request: the same
+  calls that killed the process now return a clean 500, the server stays up,
+  and the pool reconnects by itself once the database is back.
 
-All four were verified against a running backend: text-layer PDFs upload
+All five were verified against a running backend: text-layer PDFs upload
 and section-split correctly, corrupted/wrong-type/oversized uploads return
 the right error codes, and the server now survives OCR and DB failures that
 previously killed it outright.
 
 ## What this slice does NOT include yet
 Per the build plan, these come in later phases:
-- Voice selection UI (Phase 2)
-- Voice generation / TTS (Phase 4)
-- Playback UI + synced highlighting (Phase 5)
-- On-the-fly voice switching + caching (Phase 6)
-- Voice history, download, feedback (added to the plan after Phase 1)
+- Voice generation / TTS, chunked ahead of playback (Phase 4)
+- Playback UI + synced sentence highlighting (Phase 5)
+- On-the-fly voice/tone switching + `(section + voice + tone)` audio caching (Phase 6)
+- Download, feedback (added to the plan after Phase 1)
 
 ## A note on next steps
 This project will keep growing — multiple services, API integrations, a

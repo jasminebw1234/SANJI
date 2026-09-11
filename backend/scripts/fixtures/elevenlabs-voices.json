@@ -1,0 +1,79 @@
+{
+  "_comment": "Captured from ElevenLabs' documented GET /v1/voices response shape. This backend could not reach api.elevenlabs.io when it was written (blocked egress), so this fixture is what the normalizer was tested against, NOT a live capture. If the picker misbehaves against the real API, diff a real response against this file first — a shape change here is the most likely cause.",
+  "voices": [
+    {
+      "voice_id": "21m00Tcm4TlvDq8ikWAM",
+      "name": "Rachel",
+      "category": "premade",
+      "labels": {
+        "accent": "american",
+        "description": "calm",
+        "age": "young",
+        "gender": "female",
+        "use_case": "narration"
+      },
+      "description": null,
+      "preview_url": "https://storage.googleapis.com/eleven-public-prod/premade/voices/21m00Tcm4TlvDq8ikWAM/sample.mp3"
+    },
+    {
+      "voice_id": "AZnzlk1XvdvUeBnXmlld",
+      "name": "Domi",
+      "category": "premade",
+      "labels": {
+        "accent": "american",
+        "description": "strong",
+        "age": "young",
+        "gender": "female",
+        "use_case": "narration"
+      },
+      "description": null,
+      "preview_url": "https://storage.googleapis.com/eleven-public-prod/premade/voices/AZnzlk1XvdvUeBnXmlld/sample.mp3"
+    },
+    {
+      "voice_id": "ErXwobaYiN019PkySvjV",
+      "name": "Antoni",
+      "category": "premade",
+      "labels": {
+        "accent": "american",
+        "description": "well-rounded",
+        "age": "young",
+        "gender": "male",
+        "use_case": "narration"
+      },
+      "description": null,
+      "preview_url": "https://storage.googleapis.com/eleven-public-prod/premade/voices/ErXwobaYiN019PkySvjV/sample.mp3"
+    },
+    {
+      "voice_id": "onwK4e9ZLuTAKqWW03F9",
+      "name": "Daniel",
+      "category": "premade",
+      "labels": {
+        "accent": "british",
+        "description": "authoritative",
+        "age": "middle aged",
+        "gender": "male",
+        "use_case": "news"
+      },
+      "description": null,
+      "preview_url": "https://storage.googleapis.com/eleven-public-prod/premade/voices/onwK4e9ZLuTAKqWW03F9/sample.mp3"
+    },
+    {
+      "voice_id": "ThT5KcBeYPX3keUQqHPh",
+      "name": "Dorothy",
+      "category": "premade",
+      "labels": {
+        "accent": "british",
+        "age": "young",
+        "gender": "female"
+      },
+      "description": "A voice entry deliberately missing the description/use_case labels, to exercise the normalizer's defensive defaults.",
+      "preview_url": null
+    },
+    {
+      "voice_id": "",
+      "name": "Malformed entry with no voice_id",
+      "labels": {},
+      "preview_url": null
+    }
+  ]
+}

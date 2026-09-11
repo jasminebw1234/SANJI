@@ -3,21 +3,32 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PDF Voice Reader — Phase 1 Test</title>
+  <title>PDF Voice Reader — Pipeline Test</title>
   <style>
     body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; color: #222; }
     h1 { font-size: 1.3rem; }
+    h2 { font-size: 1.05rem; margin-top: 28px; }
     #dropzone { border: 2px dashed #999; border-radius: 12px; padding: 32px 16px; text-align: center; cursor: pointer; }
     #dropzone.dragover { border-color: #333; background: #f5f5f5; }
     #status { margin-top: 20px; font-size: 0.95rem; }
     #result { margin-top: 20px; white-space: pre-wrap; font-size: 0.85rem; background: #f5f5f5; padding: 12px; border-radius: 8px; }
     .flag { color: #b45309; }
     .error { color: #b91c1c; }
+    #voiceSection { display: none; border-top: 1px solid #ddd; margin-top: 28px; }
+    .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .filters select { padding: 6px; border-radius: 6px; border: 1px solid #bbb; font-size: 0.85rem; }
+    .voice { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 8px; }
+    .voice.selected { border-color: #333; background: #f5f5f5; }
+    .voice-meta { flex: 1; font-size: 0.85rem; }
+    .voice-meta strong { display: block; font-size: 0.95rem; }
+    .voice-meta span { color: #666; }
+    .voice button { font-size: 0.8rem; padding: 5px 9px; border-radius: 6px; border: 1px solid #bbb; background: #fff; cursor: pointer; }
+    #voiceCount { font-size: 0.8rem; color: #666; margin-bottom: 10px; }
   </style>
 </head>
 <body>
-  <h1>PDF Voice Reader — Phase 1 Test</h1>
-  <p>Upload a PDF to test: text-layer detection → OCR fallback → section extraction.</p>
+  <h1>PDF Voice Reader — Pipeline Test</h1>
+  <p>Upload a PDF to test: text-layer detection → OCR fallback → section extraction → mood tagging.</p>
 
   <div id="dropzone">
     <p>Tap to choose a PDF, or drag one here</p>
@@ -27,8 +38,21 @@
   <div id="status"></div>
   <div id="result"></div>
 
+  <div id="voiceSection">
+    <h2>Pick a narrator voice</h2>
+    <div class="filters">
+      <select id="filterGender"><option value="">Any gender</option></select>
+      <select id="filterAge"><option value="">Any age</option></select>
+      <select id="filterAccent"><option value="">Any accent</option></select>
+      <select id="filterStyle"><option value="">Any style</option></select>
+    </div>
+    <div id="voiceCount"></div>
+    <div id="voiceList"></div>
+  </div>
+
   <script>
     const API_BASE = 'http://localhost:3001/api/documents';
+    const VOICES_BASE = 'http://localhost:3001/api/voices';
 
     const dropzone = document.getElementById('dropzone');
     const fileInput = document.getElementById('fileInput');
@@ -70,13 +94,158 @@
           (data.hasTextLayer ? ' (had a text layer, no OCR needed)' : ' (used OCR)');
 
         let output = `Document ID: ${data.documentId}\n`;
+        output += `Mood tagging: ${data.moodTaggingStatus}`;
+        if (data.moodTaggingStatus === 'skipped') {
+          output += ' (set ANTHROPIC_API_KEY in backend/.env to enable)';
+        } else if (data.moodTaggingStatus === 'failed') {
+          output += ' (check the backend logs for why)';
+        }
+        output += '\n';
         if (data.needsReview) {
           output += `\n⚠ Some pages had low OCR confidence and may need review:\n`;
           output += JSON.stringify(data.ocrConfidenceFlags, null, 2);
         }
         resultEl.textContent = output;
+
+        currentDocumentId = data.documentId;
+        showVoicePicker();
       } catch (err) {
         statusEl.innerHTML = `<span class="error">Couldn't reach the backend. Is it running on port 3001?</span>`;
+      }
+    }
+
+    // --- Phase 2: voice selection ---
+
+    let currentDocumentId = null;
+    let selectedVoiceId = null;
+    let previewAudio = null;
+
+    const voiceSection = document.getElementById('voiceSection');
+    const voiceList = document.getElementById('voiceList');
+    const voiceCount = document.getElementById('voiceCount');
+    const filterEls = {
+      gender: document.getElementById('filterGender'),
+      age: document.getElementById('filterAge'),
+      accent: document.getElementById('filterAccent'),
+      style: document.getElementById('filterStyle')
+    };
+
+    Object.values(filterEls).forEach((el) => el.addEventListener('change', loadVoices));
+
+    async function showVoicePicker() {
+      voiceSection.style.display = 'block';
+      selectedVoiceId = null;
+      await loadFilters();
+      await loadVoices();
+    }
+
+    async function loadFilters() {
+      try {
+        const res = await fetch(`${VOICES_BASE}/filters`);
+        if (!res.ok) return; // loadVoices surfaces the error message
+        const { filters } = await res.json();
+
+        for (const [key, el] of Object.entries(filterEls)) {
+          const placeholder = el.options[0];
+          el.innerHTML = '';
+          el.appendChild(placeholder);
+          for (const value of filters[key] || []) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = value;
+            el.appendChild(option);
+          }
+        }
+      } catch (err) {
+        // Non-fatal: the list still loads unfiltered.
+      }
+    }
+
+    async function loadVoices() {
+      voiceList.innerHTML = '';
+      voiceCount.textContent = 'Loading voices…';
+
+      const params = new URLSearchParams();
+      for (const [key, el] of Object.entries(filterEls)) {
+        if (el.value) params.set(key, el.value);
+      }
+
+      try {
+        const res = await fetch(`${VOICES_BASE}?${params}`);
+        const data = await res.json();
+
+        if (!res.ok) {
+          voiceCount.innerHTML = `<span class="error">${data.message || 'Could not load voices.'}</span>`;
+          return;
+        }
+
+        voiceCount.textContent = `${data.count} of ${data.total} voices`;
+
+        if (data.count === 0) {
+          voiceList.innerHTML = '<p>No voices match those filters. Try widening them.</p>';
+          return;
+        }
+
+        for (const voice of data.voices) {
+          voiceList.appendChild(renderVoice(voice));
+        }
+      } catch (err) {
+        voiceCount.innerHTML = '<span class="error">Couldn\'t reach the backend.</span>';
+      }
+    }
+
+    function renderVoice(voice) {
+      const row = document.createElement('div');
+      row.className = 'voice' + (voice.voiceId === selectedVoiceId ? ' selected' : '');
+
+      const meta = document.createElement('div');
+      meta.className = 'voice-meta';
+      const traits = [voice.gender, voice.age, voice.accent, voice.style]
+        .filter((t) => t && t !== 'unspecified')
+        .join(' · ');
+      meta.innerHTML = `<strong></strong><span></span>`;
+      meta.querySelector('strong').textContent = voice.name;
+      meta.querySelector('span').textContent = traits;
+      row.appendChild(meta);
+
+      if (voice.previewUrl) {
+        const preview = document.createElement('button');
+        preview.textContent = 'Preview';
+        preview.addEventListener('click', () => {
+          if (previewAudio) previewAudio.pause();
+          previewAudio = new Audio(voice.previewUrl);
+          previewAudio.play();
+        });
+        row.appendChild(preview);
+      }
+
+      const choose = document.createElement('button');
+      choose.textContent = voice.voiceId === selectedVoiceId ? 'Selected' : 'Use this';
+      choose.addEventListener('click', () => selectVoice(voice));
+      row.appendChild(choose);
+
+      return row;
+    }
+
+    async function selectVoice(voice) {
+      try {
+        const res = await fetch(`${API_BASE}/${currentDocumentId}/voice`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ voiceId: voice.voiceId })
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          voiceCount.innerHTML = `<span class="error">${data.message || 'Could not save that voice.'}</span>`;
+          return;
+        }
+
+        selectedVoiceId = voice.voiceId;
+        voiceCount.textContent = `Narrator set to ${data.voice.name}.`;
+        await loadVoices();
+      } catch (err) {
+        voiceCount.innerHTML = '<span class="error">Couldn\'t reach the backend.</span>';
       }
     }
   </script>

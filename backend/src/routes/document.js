@@ -11,6 +11,8 @@ import { checkTextLayer } from '../services/textLayerCheck.js';
 import { runOcr } from '../services/ocr.js';
 import { splitIntoSections } from '../services/sectionSplitter.js';
 import { tagSectionMoods } from '../services/moodTagger.js';
+import { getVoiceCatalog, PROVIDER } from '../services/voiceCatalog.js';
+import { asyncHandler } from '../middleware/asyncHandler.js';
 
 const router = express.Router();
 
@@ -193,7 +195,7 @@ router.post('/upload', (req, res) => {
 });
 
 // Fetch a document's status + sections, e.g. for the frontend's processing screen
-router.get('/:id', async (req, res) => {
+router.get('/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const docResult = await query(`SELECT * FROM documents WHERE id = $1`, [id]);
 
@@ -210,13 +212,13 @@ router.get('/:id', async (req, res) => {
   );
 
   res.json({ document: docResult.rows[0], sections: sectionsResult.rows });
-});
+}));
 
 // Re-run mood tagging for a document's sections. Useful when the initial
 // upload's tagging pass was skipped (no API key configured yet) or failed
 // (transient API/network issue) — lets a document be re-tagged without
 // re-uploading and re-running OCR.
-router.post('/:id/mood-tags', async (req, res) => {
+router.post('/:id/mood-tags', asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   const docResult = await query(`SELECT id FROM documents WHERE id = $1`, [id]);
@@ -261,6 +263,89 @@ router.post('/:id/mood-tags', async (req, res) => {
       message: 'Mood tagging failed — please try again in a moment.'
     });
   }
-});
+}));
+
+// --- Phase 2: per-document voice selection ---
+//
+// Stored as history rather than a single column (the schema's
+// voice_selection_history table): the latest row is the current voice, and
+// keeping the earlier ones is what Phase 6's mid-playback switching and
+// cache-reuse will read to know which voices this document has already
+// been narrated in.
+
+// Record the narrator voice the user picked for this document.
+router.post('/:id/voice', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { voiceId } = req.body || {};
+
+  if (!voiceId || typeof voiceId !== 'string') {
+    return res.status(400).json({
+      error: 'MISSING_VOICE_ID',
+      message: 'Please choose a voice.'
+    });
+  }
+
+  const docResult = await query(`SELECT id FROM documents WHERE id = $1`, [id]);
+  if (docResult.rows.length === 0) {
+    return res.status(404).json({
+      error: 'NOT_FOUND',
+      message: 'This document is no longer available. Please upload it again.'
+    });
+  }
+
+  // Validate against the real catalog so we never store a voice ID that
+  // narration generation will later fail on. If the provider is down we
+  // say so rather than silently accepting an unverifiable ID.
+  let voice;
+  try {
+    const voices = await getVoiceCatalog();
+    voice = voices.find((v) => v.voiceId === voiceId);
+  } catch (error) {
+    console.error('Voice validation failed:', error.message);
+    return res.status(502).json({
+      error: 'VOICE_PROVIDER_FAILED',
+      message: "We couldn't confirm that voice just now. Please try again in a moment."
+    });
+  }
+
+  if (!voice) {
+    return res.status(400).json({
+      error: 'UNKNOWN_VOICE',
+      message: "That voice isn't available anymore. Please pick another one."
+    });
+  }
+
+  await query(
+    `INSERT INTO voice_selection_history (document_id, voice_id, provider) VALUES ($1, $2, $3)`,
+    [id, voiceId, PROVIDER]
+  );
+
+  res.json({ documentId: id, voice });
+}));
+
+// The document's currently selected voice (most recent selection), plus the
+// full selection history for later phases.
+router.get('/:id/voice', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const historyResult = await query(
+    `SELECT voice_id, provider, selected_at FROM voice_selection_history
+     WHERE document_id = $1 ORDER BY selected_at DESC`,
+    [id]
+  );
+
+  if (historyResult.rows.length === 0) {
+    return res.status(404).json({
+      error: 'NO_VOICE_SELECTED',
+      message: 'No voice has been selected for this document yet.'
+    });
+  }
+
+  res.json({
+    documentId: id,
+    current: historyResult.rows[0],
+    history: historyResult.rows
+  });
+}));
 
 export default router;
