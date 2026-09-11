@@ -122,13 +122,55 @@ Run the schema against your database (via Neon's SQL editor in their dashboard, 
 psql "$DATABASE_URL" -f src/db/schema.sql
 ```
 
-Start the backend:
+## Testing it yourself
+
+**1. Check the setup before starting anything.** This catches the confusing
+failures (missing poppler, un-migrated schema, a rejected API key) and tells
+you exactly what to do about each:
+
+```bash
+cd backend
+npm run doctor
+```
+
+It exits 0 when the backend can start. Missing API keys show as `SKIP` and
+never fail the run — a key that's *set but rejected* shows as `WARN`, which
+is a different problem worth knowing about.
+
+**2. Start the backend** in one terminal:
 ```bash
 npm start
 ```
 
-Open `frontend/index.html` directly in your browser (or serve it with any
-static server) and upload a PDF to test the pipeline end to end.
+**3. Run the smoke test** in another. It exercises every endpoint — upload,
+text extraction, section persistence, mood tagging, voice selection, and the
+error paths — and reports pass/fail per check:
+
+```bash
+npm run smoke-test
+```
+
+It generates its own test PDF, so you don't need to supply a file. To run the
+pipeline against a real document instead:
+
+```bash
+npm run smoke-test -- ../Hear_me_out_MVP_req_doc.pdf
+```
+
+(The MVP plan PDF is a genuinely good test document — it's real informational
+content with varied tone, and it splits into ~53 sections.)
+
+Checks needing an unconfigured API key are reported as `SKIP` rather than
+counted as failures, so a clean run without any keys is `12 passed, 0 failed,
+4 skipped`.
+
+**4. Try it in the browser.** Open `frontend/index.html` directly (or serve it
+with any static server), upload a PDF, and — if `ELEVENLABS_API_KEY` is set —
+pick a narrator voice with the filters and preview buttons.
+
+**5. Spot-check the mood tagging quality** (needs `ANTHROPIC_API_KEY`) — see
+the section above. This is the one thing the smoke test can't judge for you:
+it verifies tags got *assigned*, not that they're *right*.
 
 ## Fixes applied during setup (worth knowing about)
 Getting this running surfaced a few real bugs in the Phase 1 code, not just

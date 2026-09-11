@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "check-moods": "node scripts/check-moods.js"
+    "check-moods": "node scripts/check-moods.js",
+    "doctor": "node scripts/doctor.js",
+    "smoke-test": "node scripts/smoke-test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",
